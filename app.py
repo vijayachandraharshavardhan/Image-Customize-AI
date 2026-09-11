@@ -14,6 +14,7 @@ UPLOAD_FOLDER = BASE_DIR / "uploads"
 OUTPUT_FOLDER = BASE_DIR / "outputs"
 ALLOWED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 MAX_UPLOAD_SIZE = 30 * 1024 * 1024
+MAX_PROCESS_PIXELS = 12_000_000
 
 # Allow the full configured upload size range. The default Pillow pixel cap is too small
 # for large images and can block valid uploads before the background-removal logic begins.
@@ -61,6 +62,19 @@ def output_filename(original_name: str, extension: str) -> str:
     safe_name = secure_filename(original_name)
     stem = Path(safe_name).stem or uuid.uuid4().hex
     return f"{stem}{extension}"
+
+
+def prepare_input_for_removal(image: Image.Image) -> Image.Image:
+    width, height = image.size
+    pixel_count = width * height
+
+    if pixel_count <= MAX_PROCESS_PIXELS:
+        return image
+
+    scale = (MAX_PROCESS_PIXELS / pixel_count) ** 0.5
+    new_width = max(1, int(width * scale))
+    new_height = max(1, int(height * scale))
+    return image.resize((new_width, new_height), Image.Resampling.LANCZOS)
 
 
 def jpeg_bytes(image: Image.Image, quality: int = 85) -> bytes:
@@ -206,6 +220,7 @@ def index():
 
             with Image.open(input_path) as input_img:
                 input_img = ImageOps.exif_transpose(input_img)
+                input_img = prepare_input_for_removal(input_img)
 
                 if input_img.mode not in ("RGB", "RGBA"):
                     input_img = input_img.convert("RGBA")
