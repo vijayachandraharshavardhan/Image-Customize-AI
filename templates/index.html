@@ -167,6 +167,7 @@
         letter-spacing: -1px;
         background: linear-gradient(90deg, #60a5fa, #c084fc, #22d3ee, #60a5fa);
         background-size: 300% auto;
+        background-clip: text;
         -webkit-background-clip: text;
         -webkit-text-fill-color: transparent;
         animation: titleAnimation 1.5s ease, gradientAnimation 7s linear infinite;
@@ -790,15 +791,15 @@
           <p id="loading-text">Processing image... Please wait.</p>
         </div>
 
-        {% if output_file %}
+        {% if output_data_url %}
           <div class="result">
             {% if message %}<div class="success-message">✓ {{ message }}</div>{% endif %}
             <h2>🎉 Your Image Is Ready</h2>
             {% if uploaded_name %}<div class="file-meta">Uploaded: {{ uploaded_name }}</div>{% endif %}
             <div class="image-container">
-              <img src="{{ url_for('output_image', filename=output_file) }}" alt="Background removed preview" />
+              <img src="{{ output_data_url }}" alt="Processed preview" />
             </div>
-            <a class="download-btn" href="{{ url_for('download', filename=output_file) }}">
+            <a class="download-btn" href="{{ output_data_url }}" download="{{ output_file_name }}">
               ⬇️ Download Result
             </a>
           </div>

@@ -1,17 +1,17 @@
+import base64
 import os
 import time
 import uuid
 from io import BytesIO
 from pathlib import Path
 
-from flask import Flask, render_template, request, send_file
+from flask import Flask, render_template, request
 from PIL import Image, ImageOps
 from rembg import new_session, remove
 from werkzeug.utils import secure_filename
 
 BASE_DIR = Path(__file__).resolve().parent
 UPLOAD_FOLDER = BASE_DIR / "uploads"
-OUTPUT_FOLDER = BASE_DIR / "outputs"
 ALLOWED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 MAX_UPLOAD_SIZE = 30 * 1024 * 1024
 MAX_PROCESS_PIXELS = 12_000_000
@@ -23,7 +23,6 @@ Image.MAX_IMAGE_PIXELS = None
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_SIZE
 UPLOAD_FOLDER.mkdir(exist_ok=True)
-OUTPUT_FOLDER.mkdir(exist_ok=True)
 REMBG_SESSION = new_session("u2netp", providers=["CPUExecutionProvider"])
 
 
@@ -38,7 +37,6 @@ def cleanup_old_files(folder: Path, max_age_hours: int = 24) -> None:
 @app.before_request
 def cleanup_stale_files() -> None:
     cleanup_old_files(UPLOAD_FOLDER)
-    cleanup_old_files(OUTPUT_FOLDER)
 
 
 def get_uploaded_image() -> tuple[Image.Image | None, str | None]:
@@ -62,6 +60,11 @@ def output_filename(original_name: str, extension: str) -> str:
     safe_name = secure_filename(original_name)
     stem = Path(safe_name).stem or uuid.uuid4().hex
     return f"{stem}{extension}"
+
+
+def image_to_data_uri(data: bytes, mimetype: str) -> str:
+    encoded = base64.b64encode(data).decode("ascii")
+    return f"data:{mimetype};base64,{encoded}"
 
 
 def prepare_input_for_removal(image: Image.Image) -> Image.Image:
@@ -174,16 +177,6 @@ def pad_bytes_to_target(data: bytes, target_bytes: int) -> bytes:
     return data + (b"\0" * (target_bytes - len(data)))
 
 
-def write_bytes(data: bytes, filename: str | None = None) -> str:
-    filename = filename or f"{uuid.uuid4().hex}.jpg"
-    (OUTPUT_FOLDER / filename).write_bytes(data)
-    return filename
-
-
-def save_jpeg(image: Image.Image, filename: str | None = None) -> str:
-    return write_bytes(jpeg_bytes(image, 95), filename)
-
-
 def parse_target_size(field: str, minimum: int, maximum: int) -> int | None:
     try:
         value = int(request.form.get(field, "")) * 1024
@@ -194,7 +187,9 @@ def parse_target_size(field: str, minimum: int, maximum: int) -> int | None:
 
 @app.route("/", methods=["GET", "POST"])
 def index():
-    output_file = None
+    output_data_url = None
+    output_file_name = None
+    output_mimetype = None
     error = None
     uploaded_name = None
 
@@ -203,17 +198,15 @@ def index():
 
         if not file or not file.filename:
             error = "Please choose an image file to remove the background."
-            return render_template("index.html", output_file=None, error=error)
+            return render_template("index.html", output_data_url=None, error=error)
 
         extension = os.path.splitext(file.filename)[1].lower()
         uploaded_name = secure_filename(file.filename) or file.filename
         if extension not in ALLOWED_EXTENSIONS:
             error = "Unsupported file type. Please upload a JPG, PNG, WEBP, or BMP image."
-            return render_template("index.html", output_file=None, error=error)
+            return render_template("index.html", output_data_url=None, error=error)
 
-        filename = output_filename(file.filename, ".png")
-        input_path = UPLOAD_FOLDER / filename
-        output_path = OUTPUT_FOLDER / filename
+        input_path = UPLOAD_FOLDER / f"{uuid.uuid4().hex}{extension}"
 
         try:
             file.save(input_path)
@@ -238,23 +231,25 @@ def index():
                 if output_img.mode != "RGBA":
                     output_img = output_img.convert("RGBA")
 
+                buffer = BytesIO()
                 output_img.save(
-                    output_path,
+                    buffer,
                     format="PNG",
                     compress_level=6,
                     optimize=True,
                 )
+                output_bytes = buffer.getvalue()
 
-            output_file = filename
+            output_file_name = output_filename(file.filename, ".png")
+            output_mimetype = "image/png"
+            output_data_url = image_to_data_uri(output_bytes, output_mimetype)
 
         except Exception as exc:
             app.logger.exception("Error processing uploaded image")
             error = "The image could not be processed. Please try another image."
-            if output_path.exists():
-                output_path.unlink(missing_ok=True)
             if app.debug:
                 error = f"{error} Details: {exc}"
-            return render_template("index.html", output_file=None, error=error)
+            return render_template("index.html", output_data_url=None, error=error)
 
         finally:
             if input_path.exists():
@@ -262,7 +257,9 @@ def index():
 
     return render_template(
         "index.html",
-        output_file=output_file,
+        output_data_url=output_data_url,
+        output_file_name=output_file_name,
+        output_mimetype=output_mimetype,
         uploaded_name=uploaded_name,
         error=error,
     )
@@ -281,19 +278,17 @@ def process_standard_image(operation: str):
             if target is None:
                 raise ValueError
             resized_bytes = fit_jpeg_target(image, target, 10 * 1024)
-            output_file = write_bytes(
-                pad_bytes_to_target(resized_bytes, target),
-                output_filename(original_name, ".jpg"),
-            )
+            output_bytes = pad_bytes_to_target(resized_bytes, target)
+            output_file_name = output_filename(original_name, ".jpg")
+            output_mimetype = "image/jpeg"
             message = "Image enlarged to the requested file size."
         elif operation == "reduce":
             target = parse_target_size("target_size", 1 * 1024, MAX_UPLOAD_SIZE)
             if target is None:
                 raise ValueError
-            output_file = write_bytes(
-                fit_jpeg_target(image, target),
-                output_filename(original_name, ".jpg"),
-            )
+            output_bytes = fit_jpeg_target(image, target)
+            output_file_name = output_filename(original_name, ".jpg")
+            output_mimetype = "image/jpeg"
             message = "Image compressed to the requested file size."
         else:
             ratio_parts = request.form.get("ratio", "1:1").split(":", 1)
@@ -314,14 +309,20 @@ def process_standard_image(operation: str):
                 image = canvas.convert("RGB")
             else:
                 image = ImageOps.fit(image, (target_width, target_height), method=Image.Resampling.LANCZOS)
-            output_file = save_jpeg(image, output_filename(original_name, ".jpg"))
+            output_bytes = jpeg_bytes(image, 95)
+            output_file_name = output_filename(original_name, ".jpg")
+            output_mimetype = "image/jpeg"
             message = "Image ratio adjusted successfully."
     except (ValueError, OSError):
         return render_template("index.html", error="Please check the selected settings and try again.", active_tool=operation)
 
+    output_data_url = image_to_data_uri(output_bytes, output_mimetype)
+
     return render_template(
         "index.html",
-        output_file=output_file,
+        output_data_url=output_data_url,
+        output_file_name=output_file_name,
+        output_mimetype=output_mimetype,
         uploaded_name=original_name,
         message=message,
         active_tool=operation,
@@ -341,29 +342,6 @@ def reduce_size():
 @app.route("/adjust-ratio", methods=["POST"])
 def adjust_ratio():
     return process_standard_image("ratio")
-
-
-@app.route("/outputs/<filename>")
-def output_image(filename):
-    file_path = OUTPUT_FOLDER / filename
-    if not file_path.exists():
-        return "Image not found", 404
-    mimetype = "image/png" if file_path.suffix.lower() == ".png" else "image/jpeg"
-    return send_file(file_path, mimetype=mimetype)
-
-
-@app.route("/download/<filename>")
-def download(filename):
-    file_path = OUTPUT_FOLDER / filename
-    if not file_path.exists():
-        return "File not found", 404
-    is_png = file_path.suffix.lower() == ".png"
-    return send_file(
-        file_path,
-        as_attachment=True,
-        download_name=file_path.name,
-        mimetype="image/png" if is_png else "image/jpeg",
-    )
 
 
 @app.route("/health")
