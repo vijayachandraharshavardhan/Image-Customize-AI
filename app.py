@@ -15,11 +15,15 @@ OUTPUT_FOLDER = BASE_DIR / "outputs"
 ALLOWED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 MAX_UPLOAD_SIZE = 30 * 1024 * 1024
 
+# Allow the full configured upload size range. The default Pillow pixel cap is too small
+# for large images and can block valid uploads before the background-removal logic begins.
+Image.MAX_IMAGE_PIXELS = None
+
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_SIZE
 UPLOAD_FOLDER.mkdir(exist_ok=True)
 OUTPUT_FOLDER.mkdir(exist_ok=True)
-REMBG_SESSION = new_session("u2netp")
+REMBG_SESSION = new_session("u2netp", providers=["CPUExecutionProvider"])
 
 
 def cleanup_old_files(folder: Path, max_age_hours: int = 24) -> None:
@@ -228,11 +232,13 @@ def index():
 
             output_file = filename
 
-        except Exception:
+        except Exception as exc:
             app.logger.exception("Error processing uploaded image")
             error = "The image could not be processed. Please try another image."
             if output_path.exists():
                 output_path.unlink(missing_ok=True)
+            if app.debug:
+                error = f"{error} Details: {exc}"
             return render_template("index.html", output_file=None, error=error)
 
         finally:
