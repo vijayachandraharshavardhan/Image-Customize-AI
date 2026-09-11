@@ -791,15 +791,15 @@
           <p id="loading-text">Processing image... Please wait.</p>
         </div>
 
-        {% if output_data_url %}
+        {% if result_id %}
           <div class="result">
             {% if message %}<div class="success-message">✓ {{ message }}</div>{% endif %}
             <h2>🎉 Your Image Is Ready</h2>
             {% if uploaded_name %}<div class="file-meta">Uploaded: {{ uploaded_name }}</div>{% endif %}
             <div class="image-container">
-              <img src="{{ output_data_url }}" alt="Processed preview" />
+              <img src="{{ url_for('result_image', result_id=result_id) }}" alt="Processed preview" />
             </div>
-            <a class="download-btn" href="{{ output_data_url }}" download="{{ output_file_name }}">
+            <a class="download-btn" href="{{ url_for('download_result', result_id=result_id) }}" download="{{ output_file_name }}">
               ⬇️ Download Result
             </a>
           </div>

@@ -1,11 +1,10 @@
-import base64
 import os
 import time
 import uuid
 from io import BytesIO
 from pathlib import Path
 
-from flask import Flask, render_template, request
+from flask import Flask, Response, render_template, request
 from PIL import Image, ImageOps
 from rembg import new_session, remove
 from werkzeug.utils import secure_filename
@@ -15,6 +14,8 @@ UPLOAD_FOLDER = BASE_DIR / "uploads"
 ALLOWED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 MAX_UPLOAD_SIZE = 30 * 1024 * 1024
 MAX_PROCESS_PIXELS = 12_000_000
+RESULTS: dict[str, tuple[bytes, str, str, float]] = {}
+MAX_RESULT_CACHE_ITEMS = 3
 
 # Allow the full configured upload size range. The default Pillow pixel cap is too small
 # for large images and can block valid uploads before the background-removal logic begins.
@@ -37,6 +38,15 @@ def cleanup_old_files(folder: Path, max_age_hours: int = 24) -> None:
 @app.before_request
 def cleanup_stale_files() -> None:
     cleanup_old_files(UPLOAD_FOLDER)
+    cleanup_old_results()
+
+
+def cleanup_old_results(max_age_hours: int = 1) -> None:
+    """Delete stale in-memory results to avoid unbounded memory growth."""
+    cutoff = time.time() - (max_age_hours * 3600)
+    for result_id, (_, _, _, created_at) in list(RESULTS.items()):
+        if created_at < cutoff:
+            RESULTS.pop(result_id, None)
 
 
 def get_uploaded_image() -> tuple[Image.Image | None, str | None]:
@@ -62,9 +72,15 @@ def output_filename(original_name: str, extension: str) -> str:
     return f"{stem}{extension}"
 
 
-def image_to_data_uri(data: bytes, mimetype: str) -> str:
-    encoded = base64.b64encode(data).decode("ascii")
-    return f"data:{mimetype};base64,{encoded}"
+def store_result(data: bytes, mimetype: str, filename: str) -> str:
+    result_id = uuid.uuid4().hex
+    RESULTS[result_id] = (data, mimetype, filename, time.time())
+
+    if len(RESULTS) > MAX_RESULT_CACHE_ITEMS:
+        oldest_id = min(RESULTS, key=lambda item: RESULTS[item][3])
+        RESULTS.pop(oldest_id, None)
+
+    return result_id
 
 
 def prepare_input_for_removal(image: Image.Image) -> Image.Image:
@@ -187,9 +203,8 @@ def parse_target_size(field: str, minimum: int, maximum: int) -> int | None:
 
 @app.route("/", methods=["GET", "POST"])
 def index():
-    output_data_url = None
+    result_id = None
     output_file_name = None
-    output_mimetype = None
     error = None
     uploaded_name = None
 
@@ -241,8 +256,7 @@ def index():
                 output_bytes = buffer.getvalue()
 
             output_file_name = output_filename(file.filename, ".png")
-            output_mimetype = "image/png"
-            output_data_url = image_to_data_uri(output_bytes, output_mimetype)
+            result_id = store_result(output_bytes, "image/png", output_file_name)
 
         except Exception as exc:
             app.logger.exception("Error processing uploaded image")
@@ -257,9 +271,8 @@ def index():
 
     return render_template(
         "index.html",
-        output_data_url=output_data_url,
+        result_id=result_id,
         output_file_name=output_file_name,
-        output_mimetype=output_mimetype,
         uploaded_name=uploaded_name,
         error=error,
     )
@@ -316,13 +329,12 @@ def process_standard_image(operation: str):
     except (ValueError, OSError):
         return render_template("index.html", error="Please check the selected settings and try again.", active_tool=operation)
 
-    output_data_url = image_to_data_uri(output_bytes, output_mimetype)
+    result_id = store_result(output_bytes, output_mimetype, output_file_name)
 
     return render_template(
         "index.html",
-        output_data_url=output_data_url,
+        result_id=result_id,
         output_file_name=output_file_name,
-        output_mimetype=output_mimetype,
         uploaded_name=original_name,
         message=message,
         active_tool=operation,
@@ -342,6 +354,30 @@ def reduce_size():
 @app.route("/adjust-ratio", methods=["POST"])
 def adjust_ratio():
     return process_standard_image("ratio")
+
+
+@app.route("/result/<result_id>")
+def result_image(result_id: str):
+    result = RESULTS.get(result_id)
+    if result is None:
+        return "Result not found", 404
+
+    data, mimetype, _, _ = result
+    return Response(data, mimetype=mimetype)
+
+
+@app.route("/download/<result_id>")
+def download_result(result_id: str):
+    result = RESULTS.get(result_id)
+    if result is None:
+        return "Result not found", 404
+
+    data, mimetype, filename, _ = result
+    return Response(
+        data,
+        mimetype=mimetype,
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
 
 
 @app.route("/health")
