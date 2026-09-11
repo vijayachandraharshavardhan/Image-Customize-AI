@@ -2,6 +2,6 @@ services:
   - type: web
     name: image-customize-ai
     env: python
-    plan: free
+    plan: starter
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:app
+    startCommand: gunicorn app:app --workers 1 --timeout 120
